@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "projectId": "humans-refresh",
+  "appUrl": "http://localhost:3000",
+  "agent": {
+    "host": "127.0.0.1",
+    "corePort": 4678,
+    "debugPort": 7331
+  },
+  "browser": {
+    "cdpPort": 9222
+  },
+  "capture": {
+    "allowedDomains": [
+      "localhost"
+    ],
+    "networkAllowlist": []
+  },
+  "defaults": {
+    "queryWindowMinutes": 30
+  }
+}

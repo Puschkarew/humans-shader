@@ -162,6 +162,13 @@
         cursor: pointer;
       }
 
+      .control-input input[type="checkbox"] {
+        width: 18px;
+        height: 18px;
+        margin: 0;
+        accent-color: var(--panel-accent);
+      }
+
       .stat-row {
         display: flex;
         align-items: center;
@@ -249,7 +256,7 @@
           <div class="stat-row"><span>Render pixels</span><span class="stat-value" id="statPixels">--</span></div>
           <div class="stat-row"><span>RES scale</span><span class="stat-value" id="statResScale">--</span></div>
           <div class="stat-row"><span>DPR</span><span class="stat-value" id="statDpr">--</span></div>
-          <div class="stat-row"><span>Passes</span><span class="stat-value" id="statPasses">5</span></div>
+          <div class="stat-row"><span>Passes</span><span class="stat-value" id="statPasses">6</span></div>
         </div>
 
         <div class="panel-actions">
@@ -262,18 +269,17 @@
     <script>
       (() => {
         const DEFAULTS = {
-          RES_SCALE: 0.5,
+          RES_SCALE: 0.4,
           DPR_MAX: 1,
           POINTER_SMOOTHING: 0.1,
-          BG_COLOR: "#FFAAA5",
-          VIGNETTE_COLOR: "#4A0035",
-          OUTPUT_COLOR: "#FFD198",
-          VIGNETTE_RADIUS: 0.354,
-          VIGNETTE_FALLOFF: 1.0,
-          VIGNETTE_DISPLACE: 0.0,
-          VIGNETTE_MIX: 1.0,
-          VIGNETTE_ANGLE: 0.0,
-          VIGNETTE_SKEW: 0.54,
+          BG_COLOR: "#A4606A",
+          PARTICLE_CENTER_COLOR: "#FFE59E",
+          PARTICLE_EDGE_COLOR: "#4D0037",
+          PARTICLE_RADIUS: 0.31,
+          PARTICLE_SOFTNESS: 0.2,
+          PARTICLE_REVEAL_TIME: 0.12,
+          PARTICLE_FADE_TIME: 0.9,
+          BG_TEXTURE_ENABLED: 1,
           SINE_FREQUENCY: 0.35,
           SINE_AMPLITUDE: 1.18,
           SINE_FALLOFF: 0.5,
@@ -282,20 +288,20 @@
           SINE_SPEED: 0.1,
           SINE_MIX_RADIUS: 1.0,
           SINE_TRACK_MOUSE: 0.0,
-          SHATTER_SCALE: 0.534,
+          SHATTER_SCALE: 0.25,
           SHATTER_AMOUNT: 1.0,
           SHATTER_ANGLE: 44.0,
           SHATTER_RADIUS: 1.0,
           SHATTER_SKEW: 0.84,
           SHATTER_MIX_RADIUS: 1.0,
           SHATTER_MIX_INVERT: 0,
-          BOKEH_RADIUS: 0.754,
+          BOKEH_RADIUS: 1.41,
           BOKEH_TILT: 0.5,
           BOKEH_MIX_RADIUS: 1.0,
           BOKEH_TRACK_MOUSE: 0.0
         };
 
-        const STORAGE_KEY = "bokeh-controls-v3-ref";
+        const STORAGE_KEY = "bokeh-controls-v4-particle";
 
         function cloneDefaults() {
           return { ...DEFAULTS };
@@ -336,6 +342,11 @@
         }
 
         const config = loadConfig();
+        const INTERNAL_SHAPE = {
+          FALL_OFF: 1.0,
+          SKEW: 0.54,
+          ANGLE: 0.0
+        };
 
         function saveConfig() {
           try {
@@ -379,43 +390,56 @@
           }
         `;
 
-        const vignetteFragmentSource = `#version 300 es
+        const revealFragmentSource = `#version 300 es
           precision highp float;
           #define TWO_PI 6.28318530718
           in vec2 vUv;
           out vec4 fragColor;
+          uniform sampler2D tPrevReveal;
+          uniform vec2 uPointerPos;
+          uniform float uPointerActive;
+          uniform float uDt;
           uniform float uRadius;
+          uniform float uSoftness;
           uniform float uFalloff;
-          uniform float uMix;
-          uniform float uDisplace;
           uniform float uSkew;
           uniform float uAngle;
-          uniform vec3 uVignetteColor;
-          uniform float uColorAlpha;
-          uniform vec2 uPos;
-          uniform sampler2D tInput;
+          uniform float uRevealTime;
+          uniform float uFadeTime;
+          uniform vec3 uCenterColor;
+          uniform vec3 uEdgeColor;
           uniform vec2 uResolution;
-          uniform sampler2D tBgTexture;
-          uniform vec3 uClearColor;
           mat2 rot(float a) {
             return mat2(cos(a), -sin(a), sin(a), cos(a));
           }
           void main() {
-            vec2 uv = vUv;
-            vec4 color = vec4(vec3(1.0), 0.0);
-            float luma = dot(color.rgb, vec3(0.299, 0.587, 0.114));
-            float displacement = (luma - 0.5) * uDisplace * 0.5;
+            vec4 prev = texture(tPrevReveal, vUv);
             vec2 aspectRatio = vec2(uResolution.x / uResolution.y, 1.0);
             vec2 skew = vec2(uSkew, 1.0 - uSkew);
             float halfRadius = uRadius * 0.5;
             float innerEdge = halfRadius - uFalloff * halfRadius * 0.5;
             float outerEdge = halfRadius + uFalloff * halfRadius * 0.5;
-            vec2 pos = uPos;
-            vec2 scaledUV = uv * aspectRatio * rot(uAngle * TWO_PI) * skew;
-            vec2 scaledPos = pos * aspectRatio * rot(uAngle * TWO_PI) * skew;
+            vec2 scaledUV = vUv * aspectRatio * rot(uAngle * TWO_PI) * skew;
+            vec2 scaledPos = uPointerPos * aspectRatio * rot(uAngle * TWO_PI) * skew;
             float radius = distance(scaledUV, scaledPos);
-            float falloff = smoothstep(innerEdge + displacement, outerEdge + displacement, radius);
-            fragColor = mix(vec4(uClearColor, 0.0), vec4(uVignetteColor, 1.0), falloff);
+            float falloff = smoothstep(innerEdge, outerEdge, radius);
+            float profile = pow(clamp(1.0 - falloff, 0.0, 1.0), max(uSoftness, 0.001));
+            float targetAlphaActive = profile;
+            float pointerEnabled = step(0.5, uPointerActive);
+            float targetAlpha = mix(0.0, targetAlphaActive, pointerEnabled);
+            float targetColorMix = mix(0.0, 1.0 - profile, pointerEnabled);
+            vec3 targetColor = mix(uCenterColor, uEdgeColor, targetColorMix);
+            float revealTime = max(uRevealTime, 0.001);
+            float revealK = 1.0 - exp(-uDt / revealTime);
+            float fadeTime = max(uFadeTime, 0.001);
+            float fadeK = 1.0 - exp(-uDt / fadeTime);
+            float clearK = 1.0 - exp(-uDt / max(uRevealTime * 0.35, 0.001));
+            float toBackground = step(prev.a, targetAlpha);
+            float activeK = mix(revealK, clearK, toBackground);
+            float alphaK = mix(fadeK, activeK, pointerEnabled);
+            float nextAlpha = mix(prev.a, targetAlpha, alphaK);
+            vec3 nextColor = mix(prev.rgb, targetColor, alphaK);
+            fragColor = vec4(nextColor, nextAlpha);
           }
         `;
 
@@ -517,7 +541,6 @@
           precision highp float;
           in vec2 vUv;
           out vec4 fragColor;
-          #define PI 3.14159265
           #define PI2 6.28318530718
           #define ITERATIONS 50.0
           #define GOLDEN_ANGLE 2.39996323
@@ -589,8 +612,8 @@
           uniform sampler2D tBgTexture;
           uniform vec3 uBgColor;
           uniform sampler2D tInput;
-          uniform vec3 uOutputColor;
-          uniform vec3 uVignetteColor;
+          uniform vec3 uCenterColor;
+          uniform int uBgTextureEnabled;
           uniform int uLoaded;
           vec3 overlay(vec3 base, vec3 blend) {
             return mix(
@@ -600,22 +623,17 @@
             );
           }
           void main() {
-            if (uLoaded != 1) {
-              fragColor = vec4(197.0 / 255.0, 136.0 / 255.0, 122.0 / 255.0, 1.0);
-            } else {
-              vec3 bgTex = uLoaded == 1 ? texture(tBgTexture, vUv).rgb : vec3(1.0);
-              vec3 base = mix(
-                uBgColor,
-                overlay(uBgColor, bgTex),
-                0.61
-              );
-              vec3 clearColor = uOutputColor;
-              vec3 blend = mix(clearColor, texture(tInput, vUv).rgb, texture(tInput, vUv).a);
-              vec3 mixedColor = base * blend;
-              fragColor.rgb = mix(base, mixedColor, 0.26);
-              fragColor.a = 1.0;
-              fragColor.rgb = base * mix(vec3(1.0), blend, 0.26);
+            vec3 base = uBgColor;
+            if (uLoaded == 1 && uBgTextureEnabled == 1) {
+              vec3 bgTex = texture(tBgTexture, vUv).rgb;
+              base = mix(uBgColor, overlay(uBgColor, bgTex), 0.61);
             }
+            vec4 particle = texture(tInput, vUv);
+            vec3 blend = mix(vec3(1.0), particle.rgb, particle.a);
+            vec3 multiplied = base * mix(vec3(1.0), blend, 0.26);
+            vec3 emissive = particle.rgb * particle.a * 0.18;
+            fragColor.rgb = clamp(multiplied + emissive, 0.0, 1.0);
+            fragColor.a = 1.0;
           }
         `;
 
@@ -718,7 +736,7 @@
         gl.bindVertexArray(null);
 
         const backgroundProgram = createProgram(gl, vertexShaderSource, backgroundFragmentSource);
-        const vignetteProgram = createProgram(gl, vertexShaderSource, vignetteFragmentSource);
+        const revealProgram = createProgram(gl, vertexShaderSource, revealFragmentSource);
         const sineProgram = createProgram(gl, vertexShaderSource, sineFragmentSource);
         const shatterProgram = createProgram(gl, vertexShaderSource, shatterFragmentSource);
         const bokehProgram = createProgram(gl, vertexShaderSource, bokehFragmentSource);
@@ -728,20 +746,21 @@
           bgColor: gl.getUniformLocation(backgroundProgram, "uBgColor")
         };
 
-        const vignetteUniforms = {
-          radius: gl.getUniformLocation(vignetteProgram, "uRadius"),
-          falloff: gl.getUniformLocation(vignetteProgram, "uFalloff"),
-          mix: gl.getUniformLocation(vignetteProgram, "uMix"),
-          displace: gl.getUniformLocation(vignetteProgram, "uDisplace"),
-          skew: gl.getUniformLocation(vignetteProgram, "uSkew"),
-          angle: gl.getUniformLocation(vignetteProgram, "uAngle"),
-          vignetteColor: gl.getUniformLocation(vignetteProgram, "uVignetteColor"),
-          colorAlpha: gl.getUniformLocation(vignetteProgram, "uColorAlpha"),
-          pos: gl.getUniformLocation(vignetteProgram, "uPos"),
-          resolution: gl.getUniformLocation(vignetteProgram, "uResolution"),
-          clearColor: gl.getUniformLocation(vignetteProgram, "uClearColor"),
-          input: gl.getUniformLocation(vignetteProgram, "tInput"),
-          bgTexture: gl.getUniformLocation(vignetteProgram, "tBgTexture")
+        const revealUniforms = {
+          prevReveal: gl.getUniformLocation(revealProgram, "tPrevReveal"),
+          pointerPos: gl.getUniformLocation(revealProgram, "uPointerPos"),
+          pointerActive: gl.getUniformLocation(revealProgram, "uPointerActive"),
+          dt: gl.getUniformLocation(revealProgram, "uDt"),
+          radius: gl.getUniformLocation(revealProgram, "uRadius"),
+          softness: gl.getUniformLocation(revealProgram, "uSoftness"),
+          falloff: gl.getUniformLocation(revealProgram, "uFalloff"),
+          skew: gl.getUniformLocation(revealProgram, "uSkew"),
+          angle: gl.getUniformLocation(revealProgram, "uAngle"),
+          revealTime: gl.getUniformLocation(revealProgram, "uRevealTime"),
+          fadeTime: gl.getUniformLocation(revealProgram, "uFadeTime"),
+          centerColor: gl.getUniformLocation(revealProgram, "uCenterColor"),
+          edgeColor: gl.getUniformLocation(revealProgram, "uEdgeColor"),
+          resolution: gl.getUniformLocation(revealProgram, "uResolution")
         };
 
         const sineUniforms = {
@@ -792,14 +811,13 @@
           bgTexture: gl.getUniformLocation(outputProgram, "tBgTexture"),
           bgColor: gl.getUniformLocation(outputProgram, "uBgColor"),
           input: gl.getUniformLocation(outputProgram, "tInput"),
-          outputColor: gl.getUniformLocation(outputProgram, "uOutputColor"),
-          vignetteColor: gl.getUniformLocation(outputProgram, "uVignetteColor"),
+          centerColor: gl.getUniformLocation(outputProgram, "uCenterColor"),
+          bgTextureEnabled: gl.getUniformLocation(outputProgram, "uBgTextureEnabled"),
           loaded: gl.getUniformLocation(outputProgram, "uLoaded")
         };
 
-        gl.useProgram(vignetteProgram);
-        gl.uniform1i(vignetteUniforms.input, 0);
-        gl.uniform1i(vignetteUniforms.bgTexture, 1);
+        gl.useProgram(revealProgram);
+        gl.uniform1i(revealUniforms.prevReveal, 0);
 
         gl.useProgram(sineProgram);
         gl.uniform1i(sineUniforms.input, 0);
@@ -850,7 +868,8 @@
         });
 
         let backgroundTarget = null;
-        let blankTarget = null;
+        let revealReadTarget = null;
+        let revealWriteTarget = null;
         let pingTarget = null;
         let pongTarget = null;
         let screenWidth = 1;
@@ -872,9 +891,13 @@
             gl.deleteTexture(backgroundTarget.texture);
             gl.deleteFramebuffer(backgroundTarget.fbo);
           }
-          if (blankTarget) {
-            gl.deleteTexture(blankTarget.texture);
-            gl.deleteFramebuffer(blankTarget.fbo);
+          if (revealReadTarget) {
+            gl.deleteTexture(revealReadTarget.texture);
+            gl.deleteFramebuffer(revealReadTarget.fbo);
+          }
+          if (revealWriteTarget) {
+            gl.deleteTexture(revealWriteTarget.texture);
+            gl.deleteFramebuffer(revealWriteTarget.fbo);
           }
           if (pingTarget) {
             gl.deleteTexture(pingTarget.texture);
@@ -886,22 +909,33 @@
           }
 
           backgroundTarget = createRenderTarget(fieldWidth, fieldHeight);
-          blankTarget = createRenderTarget(fieldWidth, fieldHeight);
+          revealReadTarget = createRenderTarget(fieldWidth, fieldHeight);
+          revealWriteTarget = createRenderTarget(fieldWidth, fieldHeight);
           pingTarget = createRenderTarget(fieldWidth, fieldHeight);
           pongTarget = createRenderTarget(fieldWidth, fieldHeight);
+          clearRevealTargets();
         }
 
         const pointerTarget = { x: 0.5, y: 0.5 };
         const pointerCurrent = { x: 0.5, y: 0.5 };
+        let pointerActive = false;
 
         function updatePointer(event) {
           const x = event.clientX / window.innerWidth;
           const y = 1 - event.clientY / window.innerHeight;
           pointerTarget.x = Math.min(1, Math.max(0, x));
           pointerTarget.y = Math.min(1, Math.max(0, y));
+          pointerActive = true;
+        }
+
+        function deactivatePointer() {
+          pointerActive = false;
         }
 
         window.addEventListener("pointermove", updatePointer, { passive: true });
+        window.addEventListener("pointerleave", deactivatePointer, { passive: true });
+        window.addEventListener("pointercancel", deactivatePointer, { passive: true });
+        window.addEventListener("blur", deactivatePointer);
 
         function bindTarget(target) {
           if (target) {
@@ -913,6 +947,22 @@
           }
         }
 
+        function clearTarget(target, r, g, b, a) {
+          bindTarget(target);
+          gl.clearColor(r, g, b, a);
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        }
+
+        function clearRevealTargets() {
+          if (!revealReadTarget || !revealWriteTarget) {
+            return;
+          }
+          const center = hexToRgb(config.PARTICLE_CENTER_COLOR);
+          clearTarget(revealReadTarget, center[0], center[1], center[2], 0.0);
+          clearTarget(revealWriteTarget, center[0], center[1], center[2], 0.0);
+          bindTarget(null);
+        }
+
         function renderBackground(target) {
           gl.useProgram(backgroundProgram);
           bindTarget(target);
@@ -922,28 +972,28 @@
           gl.drawArrays(gl.TRIANGLES, 0, 3);
         }
 
-        function renderVignette(time, inputTarget, outputTarget) {
-          gl.useProgram(vignetteProgram);
+        function renderReveal(deltaSeconds, inputTarget, outputTarget) {
+          gl.useProgram(revealProgram);
           bindTarget(outputTarget);
           gl.bindVertexArray(vao);
-          gl.uniform1f(vignetteUniforms.radius, config.VIGNETTE_RADIUS);
-          gl.uniform1f(vignetteUniforms.falloff, config.VIGNETTE_FALLOFF);
-          gl.uniform1f(vignetteUniforms.mix, config.VIGNETTE_MIX);
-          gl.uniform1f(vignetteUniforms.displace, config.VIGNETTE_DISPLACE);
-          gl.uniform1f(vignetteUniforms.skew, config.VIGNETTE_SKEW);
-          gl.uniform1f(vignetteUniforms.angle, config.VIGNETTE_ANGLE);
-          const vignette = hexToRgb(config.VIGNETTE_COLOR);
-          gl.uniform3f(vignetteUniforms.vignetteColor, vignette[0], vignette[1], vignette[2]);
-          gl.uniform1f(vignetteUniforms.colorAlpha, 1.0);
-          gl.uniform2f(vignetteUniforms.pos, pointerCurrent.x, pointerCurrent.y);
-          gl.uniform2f(vignetteUniforms.resolution, fieldWidth, fieldHeight);
-          const clear = hexToRgb(config.BG_COLOR);
-          gl.uniform3f(vignetteUniforms.clearColor, clear[0], clear[1], clear[2]);
+          const center = hexToRgb(config.PARTICLE_CENTER_COLOR);
+          const edge = hexToRgb(config.PARTICLE_EDGE_COLOR);
+          gl.uniform2f(revealUniforms.pointerPos, pointerCurrent.x, pointerCurrent.y);
+          gl.uniform1f(revealUniforms.pointerActive, pointerActive ? 1 : 0);
+          gl.uniform1f(revealUniforms.dt, Math.max(0, deltaSeconds));
+          gl.uniform1f(revealUniforms.radius, config.PARTICLE_RADIUS);
+          gl.uniform1f(revealUniforms.softness, config.PARTICLE_SOFTNESS);
+          gl.uniform1f(revealUniforms.falloff, INTERNAL_SHAPE.FALL_OFF);
+          gl.uniform1f(revealUniforms.skew, INTERNAL_SHAPE.SKEW);
+          gl.uniform1f(revealUniforms.angle, INTERNAL_SHAPE.ANGLE);
+          gl.uniform1f(revealUniforms.revealTime, config.PARTICLE_REVEAL_TIME);
+          gl.uniform1f(revealUniforms.fadeTime, config.PARTICLE_FADE_TIME);
+          gl.uniform3f(revealUniforms.centerColor, center[0], center[1], center[2]);
+          gl.uniform3f(revealUniforms.edgeColor, edge[0], edge[1], edge[2]);
+          gl.uniform2f(revealUniforms.resolution, fieldWidth, fieldHeight);
 
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, inputTarget.texture);
-          gl.activeTexture(gl.TEXTURE1);
-          gl.bindTexture(gl.TEXTURE_2D, bgImageTexture.texture);
 
           gl.drawArrays(gl.TRIANGLES, 0, 3);
         }
@@ -1020,12 +1070,11 @@
           bindTarget(null);
           gl.bindVertexArray(vao);
           const bg = hexToRgb(config.BG_COLOR);
-          const output = hexToRgb(config.OUTPUT_COLOR);
-          const vignette = hexToRgb(config.VIGNETTE_COLOR);
+          const center = hexToRgb(config.PARTICLE_CENTER_COLOR);
           gl.uniform3f(outputUniforms.bgColor, bg[0], bg[1], bg[2]);
-          gl.uniform3f(outputUniforms.outputColor, output[0], output[1], output[2]);
-          gl.uniform3f(outputUniforms.vignetteColor, vignette[0], vignette[1], vignette[2]);
-          gl.uniform1i(outputUniforms.loaded, 1);
+          gl.uniform3f(outputUniforms.centerColor, center[0], center[1], center[2]);
+          gl.uniform1i(outputUniforms.bgTextureEnabled, Math.round(config.BG_TEXTURE_ENABLED));
+          gl.uniform1i(outputUniforms.loaded, bgImageTexture.loaded ? 1 : 0);
 
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, inputTarget.texture);
@@ -1060,7 +1109,7 @@
           statResScale.textContent = config.RES_SCALE.toFixed(2);
           const dpr = getCurrentDpr();
           statDpr.textContent = `${dpr.toFixed(2)} / ${config.DPR_MAX.toFixed(2)}`;
-          statPasses.textContent = `5`;
+          statPasses.textContent = `6`;
         }
 
         function updateFpsStats(delta, now) {
@@ -1093,13 +1142,14 @@
             pointerCurrent.y += (pointerTarget.y - pointerCurrent.y) * config.POINTER_SMOOTHING;
           }
 
+          const deltaSeconds = Math.max(0, delta * 0.001);
           renderBackground(backgroundTarget);
-          renderBackground(blankTarget);
-          renderVignette(time, blankTarget, pingTarget);
-          renderSine(time, pingTarget, pongTarget);
-          renderShatter(time, pongTarget, pingTarget);
-          renderBokeh(time, pingTarget, pongTarget);
-          renderOutput(pongTarget);
+          renderReveal(deltaSeconds, revealReadTarget, revealWriteTarget);
+          [revealReadTarget, revealWriteTarget] = [revealWriteTarget, revealReadTarget];
+          renderSine(time, revealReadTarget, pingTarget);
+          renderShatter(time, pingTarget, pongTarget);
+          renderBokeh(time, pongTarget, pingTarget);
+          renderOutput(pingTarget);
 
           updateFpsStats(delta, now);
           rafId = requestAnimationFrame(drawFrame);
@@ -1107,12 +1157,12 @@
 
         function renderOnce() {
           renderBackground(backgroundTarget);
-          renderBackground(blankTarget);
-          renderVignette(time, blankTarget, pingTarget);
-          renderSine(time, pingTarget, pongTarget);
-          renderShatter(time, pongTarget, pingTarget);
-          renderBokeh(time, pingTarget, pongTarget);
-          renderOutput(pongTarget);
+          renderReveal(0, revealReadTarget, revealWriteTarget);
+          [revealReadTarget, revealWriteTarget] = [revealWriteTarget, revealReadTarget];
+          renderSine(time, revealReadTarget, pingTarget);
+          renderShatter(time, pingTarget, pongTarget);
+          renderBokeh(time, pongTarget, pingTarget);
+          renderOutput(pingTarget);
         }
 
         function start() {
@@ -1138,6 +1188,7 @@
         function handleVisibilityChange() {
           if (document.hidden) {
             stop();
+            pointerActive = false;
           } else if (!reducedMotion) {
             start();
           }
@@ -1147,8 +1198,10 @@
           reducedMotion = event.matches;
           if (reducedMotion) {
             stop();
+            pointerActive = false;
             pointerCurrent.x = 0.5;
             pointerCurrent.y = 0.5;
+            clearRevealTargets();
             renderOnce();
           } else {
             start();
@@ -1175,14 +1228,13 @@
 
         const CONTROL_DEFS = [
           { id: "BG_COLOR", label: "Background", group: "Colors", type: "color" },
-          { id: "VIGNETTE_COLOR", label: "Vignette", group: "Colors", type: "color" },
-          { id: "OUTPUT_COLOR", label: "Output", group: "Colors", type: "color" },
-          { id: "VIGNETTE_RADIUS", label: "Radius", group: "Vignette", type: "range", min: 0.1, max: 1, step: 0.001, decimals: 3 },
-          { id: "VIGNETTE_FALLOFF", label: "Falloff", group: "Vignette", type: "range", min: 0, max: 2, step: 0.01, decimals: 2 },
-          { id: "VIGNETTE_DISPLACE", label: "Displace", group: "Vignette", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
-          { id: "VIGNETTE_MIX", label: "Mix", group: "Vignette", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
-          { id: "VIGNETTE_ANGLE", label: "Angle", group: "Vignette", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
-          { id: "VIGNETTE_SKEW", label: "Skew", group: "Vignette", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
+          { id: "PARTICLE_CENTER_COLOR", label: "Particle Center", group: "Colors", type: "color" },
+          { id: "PARTICLE_EDGE_COLOR", label: "Particle Edge", group: "Colors", type: "color" },
+          { id: "BG_TEXTURE_ENABLED", label: "Background Texture", group: "Colors", type: "checkbox" },
+          { id: "PARTICLE_RADIUS", label: "Radius", group: "Particle", type: "range", min: 0.05, max: 1, step: 0.01, decimals: 2 },
+          { id: "PARTICLE_SOFTNESS", label: "Softness", group: "Particle", type: "range", min: 0.2, max: 3, step: 0.05, decimals: 2 },
+          { id: "PARTICLE_REVEAL_TIME", label: "Reveal Time", group: "Particle", type: "range", min: 0.02, max: 1.5, step: 0.01, decimals: 2, suffix: "s" },
+          { id: "PARTICLE_FADE_TIME", label: "Fade Time", group: "Particle", type: "range", min: 0.1, max: 3, step: 0.01, decimals: 2, suffix: "s" },
           { id: "SINE_FREQUENCY", label: "Frequency", group: "Sine", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
           { id: "SINE_AMPLITUDE", label: "Amplitude", group: "Sine", type: "range", min: 0, max: 2, step: 0.01, decimals: 2 },
           { id: "SINE_FALLOFF", label: "Falloff", group: "Sine", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
@@ -1221,6 +1273,9 @@
           if (def.type === "color") {
             return value.toUpperCase();
           }
+          if (def.type === "checkbox") {
+            return Number(value) === 1 ? "On" : "Off";
+          }
           const decimals = def.decimals ?? 2;
           const text = Number(value).toFixed(decimals);
           return def.suffix ? `${text}${def.suffix}` : text;
@@ -1229,12 +1284,24 @@
         function syncControls() {
           controlMap.forEach(({ def, input, valueEl }) => {
             const value = getDefValue(def);
-            input.value = def.type === "color" ? value : value;
+            if (def.type === "checkbox") {
+              input.checked = Number(value) === 1;
+            } else {
+              input.value = value;
+            }
             valueEl.textContent = formatValue(def, value);
           });
         }
 
         function applyConfigChange(def) {
+          if (
+            def.id === "PARTICLE_CENTER_COLOR" ||
+            def.id === "PARTICLE_EDGE_COLOR" ||
+            def.id === "PARTICLE_RADIUS" ||
+            def.id === "PARTICLE_SOFTNESS"
+          ) {
+            clearRevealTargets();
+          }
           if (def.resize) {
             resize();
           }
@@ -1302,6 +1369,9 @@
 
             input.addEventListener("input", () => {
               let value = def.type === "color" ? input.value : Number(input.value);
+              if (def.type === "checkbox") {
+                value = input.checked ? 1 : 0;
+              }
               if (def.integer) {
                 value = Math.round(value);
               }
@@ -1318,6 +1388,7 @@
             config[key] = fresh[key];
           });
           resize();
+          clearRevealTargets();
           syncControls();
           updateResourceStats();
           saveConfig();
