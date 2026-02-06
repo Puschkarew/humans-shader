@@ -42,6 +42,7 @@
         right: 24px;
         width: 320px;
         max-height: calc(100vh - 48px);
+        box-sizing: border-box;
         display: flex;
         flex-direction: column;
         gap: 12px;
@@ -102,6 +103,33 @@
         gap: 16px;
         overflow: auto;
         padding-right: 4px;
+        scrollbar-width: thin;
+        scrollbar-color: rgba(246, 176, 139, 0.9) transparent;
+      }
+
+      .panel-body::-webkit-scrollbar {
+        width: 10px;
+      }
+
+      .panel-body::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
+      .panel-body::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, rgba(246, 176, 139, 0.88), rgba(248, 142, 107, 0.76));
+        border-radius: 6px;
+        border: none;
+        min-height: 32px;
+      }
+
+      .panel-body::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(180deg, rgba(246, 176, 139, 0.96), rgba(248, 142, 107, 0.9));
+      }
+
+      #controlSections {
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
       }
 
       .panel-section {
