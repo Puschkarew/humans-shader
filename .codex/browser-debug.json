@@ -1,7 +1,7 @@
 {
   "version": 1,
   "projectId": "humans-refresh",
-  "appUrl": "http://localhost:3000",
+  "appUrl": "http://127.0.0.1:4173/index.html",
   "agent": {
     "host": "127.0.0.1",
     "corePort": 4678,
@@ -12,7 +12,8 @@
   },
   "capture": {
     "allowedDomains": [
-      "localhost"
+      "localhost",
+      "127.0.0.1"
     ],
     "networkAllowlist": []
   },

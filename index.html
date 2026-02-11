@@ -305,6 +305,8 @@
           PARTICLE_EDGE_COLOR: "#4D0037",
           PARTICLE_RADIUS: 0.31,
           PARTICLE_SOFTNESS: 0.2,
+          PARTICLE_EDGE_SMOOTHNESS: 1.2,
+          PARTICLE_CONTOUR_NOISE: 0.46,
           PARTICLE_REVEAL_TIME: 0.12,
           PARTICLE_FADE_TIME: 0.9,
           BG_TEXTURE_ENABLED: 1,
@@ -373,7 +375,9 @@
         const INTERNAL_SHAPE = {
           FALL_OFF: 1.0,
           SKEW: 0.54,
-          ANGLE: 0.0
+          ANGLE: 0.0,
+          EDGE_NOISE_SCALE: 2.8,
+          EDGE_AA: 0.95
         };
 
         function saveConfig() {
@@ -424,11 +428,13 @@
           in vec2 vUv;
           out vec4 fragColor;
           uniform sampler2D tPrevReveal;
+          uniform sampler2D tBlueNoise;
           uniform vec2 uPointerPos;
           uniform float uPointerActive;
           uniform float uDt;
           uniform float uRadius;
           uniform float uSoftness;
+          uniform float uEdgeSmoothness;
           uniform float uFalloff;
           uniform float uSkew;
           uniform float uAngle;
@@ -437,8 +443,18 @@
           uniform vec3 uCenterColor;
           uniform vec3 uEdgeColor;
           uniform vec2 uResolution;
+          uniform vec2 uBlueNoiseResolution;
+          uniform float uEdgeNoiseStrength;
+          uniform float uEdgeNoiseScale;
+          uniform float uEdgeAA;
           mat2 rot(float a) {
             return mat2(cos(a), -sin(a), sin(a), cos(a));
+          }
+          float sampleBlueNoise(vec2 uv, float scale) {
+            ivec2 texSize = ivec2(max(uBlueNoiseResolution, vec2(1.0)));
+            vec2 scaled = uv * uResolution * scale * vec2(float(texSize.x) / float(texSize.y), 1.0);
+            ivec2 noiseCoord = ivec2(fract(scaled / vec2(texSize)) * vec2(texSize)) % texSize;
+            return texelFetch(tBlueNoise, noiseCoord, 0).r * 2.0 - 1.0;
           }
           void main() {
             vec4 prev = texture(tPrevReveal, vUv);
@@ -450,12 +466,22 @@
             vec2 scaledUV = vUv * aspectRatio * rot(uAngle * TWO_PI) * skew;
             vec2 scaledPos = uPointerPos * aspectRatio * rot(uAngle * TWO_PI) * skew;
             float radius = distance(scaledUV, scaledPos);
-            float falloff = smoothstep(innerEdge, outerEdge, radius);
-            float profile = pow(clamp(1.0 - falloff, 0.0, 1.0), max(uSoftness, 0.001));
-            float targetAlphaActive = profile;
+            float aa = max(fwidth(radius) * max(uEdgeAA, 0.001), 0.0005);
+            float previewFalloff = smoothstep(innerEdge - aa, outerEdge + aa, radius);
+            float previewProfile = clamp(1.0 - previewFalloff, 0.0, 1.0);
+            float contourBand = pow(clamp(1.0 - abs(previewProfile * 2.0 - 1.0), 0.0, 1.0), 0.55);
+            float contourMask = mix(0.12, 1.0, contourBand);
+            float noiseA = sampleBlueNoise(vUv, max(uEdgeNoiseScale, 0.001));
+            float noiseB = sampleBlueNoise(vUv + vec2(0.37, 0.19), max(uEdgeNoiseScale * 2.1, 0.001));
+            float edgeNoise = (noiseA * 0.72 + noiseB * 0.28) * uEdgeNoiseStrength * contourMask;
+            float falloff = smoothstep(innerEdge - aa, outerEdge + aa, radius + edgeNoise * halfRadius * 1.15);
+            float baseProfile = clamp(1.0 - falloff, 0.0, 1.0);
+            float alphaProfile = pow(baseProfile, max(uSoftness, 0.001));
+            float edgeProfile = pow(baseProfile, max(uEdgeSmoothness, 0.001));
+            float targetAlphaActive = alphaProfile;
             float pointerEnabled = step(0.5, uPointerActive);
             float targetAlpha = mix(0.0, targetAlphaActive, pointerEnabled);
-            float targetColorMix = mix(0.0, 1.0 - profile, pointerEnabled);
+            float targetColorMix = mix(0.0, 1.0 - edgeProfile, pointerEnabled);
             vec3 targetColor = mix(uCenterColor, uEdgeColor, targetColorMix);
             float revealTime = max(uRevealTime, 0.001);
             float revealK = 1.0 - exp(-uDt / revealTime);
@@ -638,11 +664,22 @@
           in vec2 vUv;
           out vec4 fragColor;
           uniform sampler2D tBgTexture;
+          uniform sampler2D tBlueNoise;
           uniform vec3 uBgColor;
           uniform sampler2D tInput;
           uniform vec3 uCenterColor;
           uniform int uBgTextureEnabled;
           uniform int uLoaded;
+          uniform vec2 uResolution;
+          uniform vec2 uBlueNoiseResolution;
+          uniform float uContourNoise;
+          float sampleBlueNoise(vec2 uv, float scale) {
+            ivec2 texSize = ivec2(max(uBlueNoiseResolution, vec2(1.0)));
+            vec2 texelUv = (uv * uResolution / vec2(texSize)) * scale;
+            vec2 tiled = fract(texelUv * vec2(float(texSize.x) / float(texSize.y), 1.0));
+            ivec2 noiseCoord = ivec2(tiled * vec2(texSize)) % texSize;
+            return texelFetch(tBlueNoise, noiseCoord, 0).r * 2.0 - 1.0;
+          }
           vec3 overlay(vec3 base, vec3 blend) {
             return mix(
               2.0 * base * blend,
@@ -657,10 +694,25 @@
               base = mix(uBgColor, overlay(uBgColor, bgTex), 0.61);
             }
             vec4 particle = texture(tInput, vUv);
-            vec3 blend = mix(vec3(1.0), particle.rgb, particle.a);
+            float particleAlpha = clamp(particle.a, 0.0, 1.0);
+            float edgeBand = pow(clamp(1.0 - abs(particleAlpha * 2.0 - 1.0), 0.0, 1.0), 0.34);
+            float noiseA = sampleBlueNoise(vUv + vec2(particleAlpha * 0.13, 0.0), 3.4);
+            float noiseB = sampleBlueNoise(vUv + vec2(0.29, 0.47), 7.8);
+            float contourNoise = noiseA * 0.74 + noiseB * 0.26;
+            float contourStrength = uContourNoise * (0.85 + uContourNoise * 1.6);
+            float contourJitter = contourNoise * contourStrength * edgeBand * 0.95;
+            float noisyAlpha = clamp(particleAlpha + contourJitter, 0.0, 1.0);
+            vec3 blend = mix(vec3(1.0), particle.rgb, noisyAlpha);
             vec3 multiplied = base * mix(vec3(1.0), blend, 0.26);
-            vec3 emissive = particle.rgb * particle.a * 0.18;
-            fragColor.rgb = clamp(multiplied + emissive, 0.0, 1.0);
+            vec3 emissive = particle.rgb * noisyAlpha * 0.18;
+            float centerWhiteness = smoothstep(0.88, 1.0, min(uCenterColor.r, min(uCenterColor.g, uCenterColor.b)));
+            float coreMask = pow(noisyAlpha, 2.2);
+            vec3 whiteCore = vec3(1.0) * coreMask * centerWhiteness * 0.42;
+            vec3 gentleTint = particle.rgb * coreMask * 0.06;
+            float contourAccent = clamp(contourStrength * edgeBand, 0.0, 1.0);
+            vec3 contourGrain = vec3(contourNoise) * contourAccent * 0.12;
+            vec3 contourShadow = vec3(-1.0) * max(0.0, -contourNoise) * contourAccent * 0.06;
+            fragColor.rgb = clamp(multiplied + emissive + gentleTint + whiteCore + contourGrain + contourShadow, 0.0, 1.0);
             fragColor.a = 1.0;
           }
         `;
@@ -776,11 +828,13 @@
 
         const revealUniforms = {
           prevReveal: gl.getUniformLocation(revealProgram, "tPrevReveal"),
+          blueNoise: gl.getUniformLocation(revealProgram, "tBlueNoise"),
           pointerPos: gl.getUniformLocation(revealProgram, "uPointerPos"),
           pointerActive: gl.getUniformLocation(revealProgram, "uPointerActive"),
           dt: gl.getUniformLocation(revealProgram, "uDt"),
           radius: gl.getUniformLocation(revealProgram, "uRadius"),
           softness: gl.getUniformLocation(revealProgram, "uSoftness"),
+          edgeSmoothness: gl.getUniformLocation(revealProgram, "uEdgeSmoothness"),
           falloff: gl.getUniformLocation(revealProgram, "uFalloff"),
           skew: gl.getUniformLocation(revealProgram, "uSkew"),
           angle: gl.getUniformLocation(revealProgram, "uAngle"),
@@ -788,7 +842,11 @@
           fadeTime: gl.getUniformLocation(revealProgram, "uFadeTime"),
           centerColor: gl.getUniformLocation(revealProgram, "uCenterColor"),
           edgeColor: gl.getUniformLocation(revealProgram, "uEdgeColor"),
-          resolution: gl.getUniformLocation(revealProgram, "uResolution")
+          resolution: gl.getUniformLocation(revealProgram, "uResolution"),
+          blueNoiseResolution: gl.getUniformLocation(revealProgram, "uBlueNoiseResolution"),
+          edgeNoiseStrength: gl.getUniformLocation(revealProgram, "uEdgeNoiseStrength"),
+          edgeNoiseScale: gl.getUniformLocation(revealProgram, "uEdgeNoiseScale"),
+          edgeAA: gl.getUniformLocation(revealProgram, "uEdgeAA")
         };
 
         const sineUniforms = {
@@ -837,15 +895,20 @@
 
         const outputUniforms = {
           bgTexture: gl.getUniformLocation(outputProgram, "tBgTexture"),
+          blueNoise: gl.getUniformLocation(outputProgram, "tBlueNoise"),
           bgColor: gl.getUniformLocation(outputProgram, "uBgColor"),
           input: gl.getUniformLocation(outputProgram, "tInput"),
           centerColor: gl.getUniformLocation(outputProgram, "uCenterColor"),
           bgTextureEnabled: gl.getUniformLocation(outputProgram, "uBgTextureEnabled"),
-          loaded: gl.getUniformLocation(outputProgram, "uLoaded")
+          loaded: gl.getUniformLocation(outputProgram, "uLoaded"),
+          resolution: gl.getUniformLocation(outputProgram, "uResolution"),
+          blueNoiseResolution: gl.getUniformLocation(outputProgram, "uBlueNoiseResolution"),
+          contourNoise: gl.getUniformLocation(outputProgram, "uContourNoise")
         };
 
         gl.useProgram(revealProgram);
         gl.uniform1i(revealUniforms.prevReveal, 0);
+        gl.uniform1i(revealUniforms.blueNoise, 1);
 
         gl.useProgram(sineProgram);
         gl.uniform1i(sineUniforms.input, 0);
@@ -861,6 +924,7 @@
         gl.useProgram(outputProgram);
         gl.uniform1i(outputUniforms.bgTexture, 1);
         gl.uniform1i(outputUniforms.input, 0);
+        gl.uniform1i(outputUniforms.blueNoise, 2);
 
         const bgImageTexture = createImageTexture({
           wrapS: gl.REPEAT,
@@ -870,7 +934,7 @@
         const blueNoiseTexture = createImageTexture({
           wrapS: gl.REPEAT,
           wrapT: gl.REPEAT,
-          linear: true
+          linear: false
         });
 
         loadImage("assets/orange-gradient.jpg", (img) => {
@@ -888,7 +952,7 @@
           updateImageTexture(blueNoiseTexture, img, {
             wrapS: gl.REPEAT,
             wrapT: gl.REPEAT,
-            linear: true
+            linear: false
           });
           if (!running || reducedMotion) {
             renderOnce();
@@ -1011,6 +1075,7 @@
           gl.uniform1f(revealUniforms.dt, Math.max(0, deltaSeconds));
           gl.uniform1f(revealUniforms.radius, config.PARTICLE_RADIUS);
           gl.uniform1f(revealUniforms.softness, config.PARTICLE_SOFTNESS);
+          gl.uniform1f(revealUniforms.edgeSmoothness, config.PARTICLE_EDGE_SMOOTHNESS);
           gl.uniform1f(revealUniforms.falloff, INTERNAL_SHAPE.FALL_OFF);
           gl.uniform1f(revealUniforms.skew, INTERNAL_SHAPE.SKEW);
           gl.uniform1f(revealUniforms.angle, INTERNAL_SHAPE.ANGLE);
@@ -1019,9 +1084,15 @@
           gl.uniform3f(revealUniforms.centerColor, center[0], center[1], center[2]);
           gl.uniform3f(revealUniforms.edgeColor, edge[0], edge[1], edge[2]);
           gl.uniform2f(revealUniforms.resolution, fieldWidth, fieldHeight);
+          gl.uniform2f(revealUniforms.blueNoiseResolution, blueNoiseTexture.width, blueNoiseTexture.height);
+          gl.uniform1f(revealUniforms.edgeNoiseStrength, config.PARTICLE_CONTOUR_NOISE);
+          gl.uniform1f(revealUniforms.edgeNoiseScale, INTERNAL_SHAPE.EDGE_NOISE_SCALE);
+          gl.uniform1f(revealUniforms.edgeAA, INTERNAL_SHAPE.EDGE_AA);
 
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, inputTarget.texture);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, blueNoiseTexture.texture);
 
           gl.drawArrays(gl.TRIANGLES, 0, 3);
         }
@@ -1103,11 +1174,16 @@
           gl.uniform3f(outputUniforms.centerColor, center[0], center[1], center[2]);
           gl.uniform1i(outputUniforms.bgTextureEnabled, Math.round(config.BG_TEXTURE_ENABLED));
           gl.uniform1i(outputUniforms.loaded, bgImageTexture.loaded ? 1 : 0);
+          gl.uniform2f(outputUniforms.resolution, fieldWidth, fieldHeight);
+          gl.uniform2f(outputUniforms.blueNoiseResolution, blueNoiseTexture.width, blueNoiseTexture.height);
+          gl.uniform1f(outputUniforms.contourNoise, config.PARTICLE_CONTOUR_NOISE);
 
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, inputTarget.texture);
           gl.activeTexture(gl.TEXTURE1);
           gl.bindTexture(gl.TEXTURE_2D, bgImageTexture.texture);
+          gl.activeTexture(gl.TEXTURE2);
+          gl.bindTexture(gl.TEXTURE_2D, blueNoiseTexture.texture);
 
           gl.drawArrays(gl.TRIANGLES, 0, 3);
         }
@@ -1261,6 +1337,8 @@
           { id: "BG_TEXTURE_ENABLED", label: "Background Texture", group: "Colors", type: "checkbox" },
           { id: "PARTICLE_RADIUS", label: "Radius", group: "Particle", type: "range", min: 0.05, max: 1, step: 0.01, decimals: 2 },
           { id: "PARTICLE_SOFTNESS", label: "Softness", group: "Particle", type: "range", min: 0.2, max: 3, step: 0.05, decimals: 2 },
+          { id: "PARTICLE_EDGE_SMOOTHNESS", label: "Edge Smoothness", group: "Particle", type: "range", min: 0.2, max: 4, step: 0.05, decimals: 2 },
+          { id: "PARTICLE_CONTOUR_NOISE", label: "Contour Noise", group: "Particle", type: "range", min: 0.0, max: 1.5, step: 0.01, decimals: 2 },
           { id: "PARTICLE_REVEAL_TIME", label: "Reveal Time", group: "Particle", type: "range", min: 0.02, max: 1.5, step: 0.01, decimals: 2, suffix: "s" },
           { id: "PARTICLE_FADE_TIME", label: "Fade Time", group: "Particle", type: "range", min: 0.1, max: 3, step: 0.01, decimals: 2, suffix: "s" },
           { id: "SINE_FREQUENCY", label: "Frequency", group: "Sine", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
@@ -1326,7 +1404,9 @@
             def.id === "PARTICLE_CENTER_COLOR" ||
             def.id === "PARTICLE_EDGE_COLOR" ||
             def.id === "PARTICLE_RADIUS" ||
-            def.id === "PARTICLE_SOFTNESS"
+            def.id === "PARTICLE_SOFTNESS" ||
+            def.id === "PARTICLE_EDGE_SMOOTHNESS" ||
+            def.id === "PARTICLE_CONTOUR_NOISE"
           ) {
             clearRevealTargets();
           }
