@@ -310,6 +310,10 @@
           PARTICLE_REVEAL_TIME: 0.12,
           PARTICLE_FADE_TIME: 0.9,
           BG_TEXTURE_ENABLED: 1,
+          GLASS_RIDGES_ENABLED: 1,
+          GLASS_RIDGES_STRENGTH: 0.72,
+          GLASS_RIDGES_SPACING: 1.08,
+          GLASS_RIDGES_DISTORTION: 0.62,
           SINE_FREQUENCY: 0.35,
           SINE_AMPLITUDE: 1.18,
           SINE_FALLOFF: 0.5,
@@ -331,7 +335,7 @@
           BOKEH_TRACK_MOUSE: 0.0
         };
 
-        const STORAGE_KEY = "bokeh-controls-v4-particle";
+        const STORAGE_KEY = "bokeh-controls-v5-glass-reference";
 
         function cloneDefaults() {
           return { ...DEFAULTS };
@@ -673,6 +677,10 @@
           uniform vec2 uResolution;
           uniform vec2 uBlueNoiseResolution;
           uniform float uContourNoise;
+          uniform int uGlassRidgesEnabled;
+          uniform float uGlassRidgesStrength;
+          uniform float uGlassRidgesSpacing;
+          uniform float uGlassRidgesDistortion;
           float sampleBlueNoise(vec2 uv, float scale) {
             ivec2 texSize = ivec2(max(uBlueNoiseResolution, vec2(1.0)));
             vec2 texelUv = (uv * uResolution / vec2(texSize)) * scale;
@@ -712,7 +720,52 @@
             float contourAccent = clamp(contourStrength * edgeBand, 0.0, 1.0);
             vec3 contourGrain = vec3(contourNoise) * contourAccent * 0.12;
             vec3 contourShadow = vec3(-1.0) * max(0.0, -contourNoise) * contourAccent * 0.06;
-            fragColor.rgb = clamp(multiplied + emissive + gentleTint + whiteCore + contourGrain + contourShadow, 0.0, 1.0);
+            vec3 finalColor = clamp(multiplied + emissive + gentleTint + whiteCore + contourGrain + contourShadow, 0.0, 1.0);
+            if (uGlassRidgesEnabled == 1) {
+              float luminance = clamp(dot(finalColor, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+              const float brightnessInfluence = 0.28;
+              float brightnessScale = mix(0.86, 1.14, luminance * brightnessInfluence + (1.0 - brightnessInfluence) * 0.5);
+              float spacingPx = max(7.0, uGlassRidgesSpacing * 14.0);
+              float distortion = clamp(uGlassRidgesDistortion, 0.0, 1.0);
+              float warpA = sin(vUv.y * 5.7 + 0.8);
+              float warpB = sin(vUv.y * 12.1 + 1.9);
+              float warpNoise = sampleBlueNoise(vec2(0.33, vUv.y * 0.41 + 0.14), 0.46);
+              float warpPx = (warpA * 0.62 + warpB * 0.38 + warpNoise * 0.18) * distortion * 2.2;
+              float ridgeCoord = (vUv.x * uResolution.x + warpPx) / spacingPx;
+              float ridgePhase = ridgeCoord * 6.28318530718;
+              float ridgeWave = sin(ridgePhase);
+              float ridgeSlope = cos(ridgePhase);
+              float ridgeBody = 1.0 - smoothstep(0.0, 0.92, abs(ridgeWave));
+              float slopeMask = smoothstep(0.18, 0.98, abs(ridgeSlope));
+              float ridgeEnvelope = 0.97 + 0.03 * sin(vUv.y * 3.4 + warpNoise * 1.3);
+              float strength = max(uGlassRidgesStrength, 0.0) * brightnessScale * ridgeEnvelope;
+              float refractPx = ridgeSlope * slopeMask * strength * (1.2 + distortion * 2.6);
+              vec2 refractUvA = clamp(vUv + vec2(refractPx / max(uResolution.x, 1.0), 0.0), 0.0, 1.0);
+              vec2 refractUvB = clamp(vUv - vec2(refractPx * 0.55 / max(uResolution.x, 1.0), 0.0), 0.0, 1.0);
+              vec3 refractedBaseA = uBgColor;
+              vec3 refractedBaseB = uBgColor;
+              if (uLoaded == 1 && uBgTextureEnabled == 1) {
+                vec3 bgTexRefractA = texture(tBgTexture, refractUvA).rgb;
+                vec3 bgTexRefractB = texture(tBgTexture, refractUvB).rgb;
+                refractedBaseA = mix(uBgColor, overlay(uBgColor, bgTexRefractA), 0.61);
+                refractedBaseB = mix(uBgColor, overlay(uBgColor, bgTexRefractB), 0.61);
+              }
+              vec4 particleRefractA = texture(tInput, refractUvA);
+              vec4 particleRefractB = texture(tInput, refractUvB);
+              float refractAlphaA = clamp(particleRefractA.a, 0.0, 1.0);
+              float refractAlphaB = clamp(particleRefractB.a, 0.0, 1.0);
+              vec3 refractBlendA = mix(vec3(1.0), particleRefractA.rgb, refractAlphaA);
+              vec3 refractBlendB = mix(vec3(1.0), particleRefractB.rgb, refractAlphaB);
+              vec3 sceneA = refractedBaseA * mix(vec3(1.0), refractBlendA, 0.26) + particleRefractA.rgb * refractAlphaA * 0.18;
+              vec3 sceneB = refractedBaseB * mix(vec3(1.0), refractBlendB, 0.26) + particleRefractB.rgb * refractAlphaB * 0.18;
+              vec3 refractedScene = mix(sceneA, sceneB, 0.35);
+              float refractMix = clamp(slopeMask * strength * (0.22 + distortion * 0.16), 0.0, 0.55);
+              finalColor = mix(finalColor, refractedScene, refractMix);
+              float caustic = ridgeBody * slopeMask * 0.012 * strength;
+              float softShadow = ridgeBody * slopeMask * 0.009 * strength;
+              finalColor = clamp(finalColor + vec3(caustic) - vec3(softShadow), 0.0, 1.0);
+            }
+            fragColor.rgb = finalColor;
             fragColor.a = 1.0;
           }
         `;
@@ -903,7 +956,11 @@
           loaded: gl.getUniformLocation(outputProgram, "uLoaded"),
           resolution: gl.getUniformLocation(outputProgram, "uResolution"),
           blueNoiseResolution: gl.getUniformLocation(outputProgram, "uBlueNoiseResolution"),
-          contourNoise: gl.getUniformLocation(outputProgram, "uContourNoise")
+          contourNoise: gl.getUniformLocation(outputProgram, "uContourNoise"),
+          glassRidgesEnabled: gl.getUniformLocation(outputProgram, "uGlassRidgesEnabled"),
+          glassRidgesStrength: gl.getUniformLocation(outputProgram, "uGlassRidgesStrength"),
+          glassRidgesSpacing: gl.getUniformLocation(outputProgram, "uGlassRidgesSpacing"),
+          glassRidgesDistortion: gl.getUniformLocation(outputProgram, "uGlassRidgesDistortion")
         };
 
         gl.useProgram(revealProgram);
@@ -1177,6 +1234,10 @@
           gl.uniform2f(outputUniforms.resolution, fieldWidth, fieldHeight);
           gl.uniform2f(outputUniforms.blueNoiseResolution, blueNoiseTexture.width, blueNoiseTexture.height);
           gl.uniform1f(outputUniforms.contourNoise, config.PARTICLE_CONTOUR_NOISE);
+          gl.uniform1i(outputUniforms.glassRidgesEnabled, Math.round(config.GLASS_RIDGES_ENABLED));
+          gl.uniform1f(outputUniforms.glassRidgesStrength, config.GLASS_RIDGES_STRENGTH);
+          gl.uniform1f(outputUniforms.glassRidgesSpacing, config.GLASS_RIDGES_SPACING);
+          gl.uniform1f(outputUniforms.glassRidgesDistortion, config.GLASS_RIDGES_DISTORTION);
 
           gl.activeTexture(gl.TEXTURE0);
           gl.bindTexture(gl.TEXTURE_2D, inputTarget.texture);
@@ -1341,6 +1402,10 @@
           { id: "PARTICLE_CONTOUR_NOISE", label: "Contour Noise", group: "Particle", type: "range", min: 0.0, max: 1.5, step: 0.01, decimals: 2 },
           { id: "PARTICLE_REVEAL_TIME", label: "Reveal Time", group: "Particle", type: "range", min: 0.02, max: 1.5, step: 0.01, decimals: 2, suffix: "s" },
           { id: "PARTICLE_FADE_TIME", label: "Fade Time", group: "Particle", type: "range", min: 0.1, max: 3, step: 0.01, decimals: 2, suffix: "s" },
+          { id: "GLASS_RIDGES_ENABLED", label: "Glass Ridges", group: "Glass", type: "checkbox" },
+          { id: "GLASS_RIDGES_STRENGTH", label: "Ridge Strength", group: "Glass", type: "range", min: 0, max: 1.8, step: 0.01, decimals: 2 },
+          { id: "GLASS_RIDGES_SPACING", label: "Ridge Spacing", group: "Glass", type: "range", min: 0.5, max: 2.4, step: 0.01, decimals: 2 },
+          { id: "GLASS_RIDGES_DISTORTION", label: "Ridge Distortion", group: "Glass", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
           { id: "SINE_FREQUENCY", label: "Frequency", group: "Sine", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
           { id: "SINE_AMPLITUDE", label: "Amplitude", group: "Sine", type: "range", min: 0, max: 2, step: 0.01, decimals: 2 },
           { id: "SINE_FALLOFF", label: "Falloff", group: "Sine", type: "range", min: 0, max: 1, step: 0.01, decimals: 2 },
